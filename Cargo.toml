@@ -2,5 +2,9 @@
 name = "maybe_box"
 version = "1.0.0"
 authors = ["Andrew Cann <shum@canndrew.org>"]
+description = "Store arbitrary data in the size of a pointer, only boxing if necessary"
+license = "MIT/Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/canndrew/maybe_box"
 
 [dependencies]
