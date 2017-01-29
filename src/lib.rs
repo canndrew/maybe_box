@@ -60,7 +60,7 @@ unsafe fn get_boxed<'a, T>(ptr: &'a mut usize) -> Box<T> {
 }
 
 /// An unpacked `MaybeBox<T>`. Produced by `MaybeBox::unpack`.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub enum Unpacked<T> {
     /// A `T` stored inline.
     Inline(T),
