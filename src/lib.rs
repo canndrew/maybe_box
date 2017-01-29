@@ -1,8 +1,17 @@
+//! Store arbitrary data in the size of a `usize`, only boxing it if necessary.
+
 use std::mem;
 use std::ptr;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
+use std::fmt;
+use std::hash;
 
+/// Hold a value of type `T` in the space for a `usize`, only boxing it if necessary.
+/// This can be a useful optimization when dealing with C APIs that allow you to pass around some
+/// arbitrary `void *`-sized piece of data.
+///
+/// This type is guranteed to be the same size as a `usize`.
 pub struct MaybeBox<T> {
     data: usize,
     _ph: PhantomData<T>,
@@ -44,13 +53,24 @@ unsafe fn get_inline<'a, T>(ptr: &'a mut usize) -> T {
     t
 }
 
-unsafe fn get_boxed<'a, T>(ptr: &'a mut usize) -> T {
+unsafe fn get_boxed<'a, T>(ptr: &'a mut usize) -> Box<T> {
     let ptr = transmogrify_boxed_mut(ptr);
     let b: Box<T> = ptr::read(ptr);
-    *b
+    b
+}
+
+/// An unpacked `MaybeBox<T>`. Produced by `MaybeBox::unpack`.
+#[derive(Debug)]
+pub enum Unpacked<T> {
+    /// A `T` stored inline.
+    Inline(T),
+    /// A `T` stored in a `Box`.
+    Boxed(Box<T>),
 }
 
 impl<T> MaybeBox<T> {
+    /// Wrap a `T` into a `MaybeBox<T>`. This will allocate if
+    /// `size_of::<T>() > size_of::<usize>()`.
     #[inline]
     pub fn new(t: T) -> MaybeBox<T> {
         let mut new: MaybeBox<T> = unsafe { mem::uninitialized() };
@@ -67,8 +87,27 @@ impl<T> MaybeBox<T> {
         }
     }
 
+    /// Consume the `MaybeBox<T>` and return the inner `T`.
     pub fn into_inner(mut self) -> T {
         let ret = self.get_inner();
+        mem::forget(self);
+        ret
+    }
+
+    /// Consume the `MaybeBox<T>` and return the inner `T`, possibly boxed (if
+    /// it was already).
+    ///
+    /// This may be more efficient than calling `into_inner` and then boxing
+    /// the returned value.
+    pub fn unpack(mut self) -> Unpacked<T> {
+        let ret = {
+            let ptr = &mut self.data;
+            if mem::size_of::<T>() <= mem::size_of::<usize>() {
+                Unpacked::Inline(unsafe { get_inline::<T>(ptr) })
+            } else {
+                Unpacked::Boxed(unsafe { get_boxed::<T>(ptr) })
+            }
+        };
         mem::forget(self);
         ret
     }
@@ -78,7 +117,7 @@ impl<T> MaybeBox<T> {
         if mem::size_of::<T>() <= mem::size_of::<usize>() {
             unsafe { get_inline::<T>(ptr) }
         } else {
-            unsafe { get_boxed::<T>(ptr) }
+            *unsafe { get_boxed::<T>(ptr) }
         }
     }
 }
@@ -119,12 +158,47 @@ impl<T> DerefMut for MaybeBox<T> {
     }
 }
 
+impl<T: fmt::Debug> fmt::Debug for MaybeBox<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let inner: &T = &**self;
+        f.debug_tuple("MaybeBox").field(inner).finish()
+    }
+}
+
+impl<U, T: PartialEq<U>> PartialEq<MaybeBox<U>> for MaybeBox<T> {
+    fn eq(&self, other: &MaybeBox<U>) -> bool {
+        let l: &T = &**self;
+        let r: &U = &**other;
+        *l == *r
+    }
+
+    fn ne(&self, other: &MaybeBox<U>) -> bool {
+        let l: &T = &**self;
+        let r: &U = &**other;
+        *l != *r
+    }
+}
+
+impl<T: Eq> Eq for MaybeBox<T> {}
+
+impl<T: hash::Hash> hash::Hash for MaybeBox<T> {
+    fn hash<H>(&self, state: &mut H)
+        where H: hash::Hasher
+    {
+        let inner: &T = &**self;
+        T::hash(inner, state)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
 
     #[test]
     fn test() {
+        assert_eq!(std::mem::size_of::<usize>(),
+                   std::mem::size_of::<MaybeBox<u32>>());
+
         let t = 123u8;
         let mb = MaybeBox::new(t);
         drop(mb);
@@ -156,6 +230,23 @@ mod test {
         let mb = MaybeBox::from(t);
         let t = mb.into_inner();
         assert_eq!(*t, 123u32);
+
+        let t = true;
+        let mb = MaybeBox::new(t);
+        assert_eq!(format!("{:?}", mb), "MaybeBox(true)");
+        match mb.unpack() {
+            Unpacked::Inline(true) => (),
+            x => panic!("Unexpected!: {:?}", x),
+        };
+
+        let t = String::from("hello");
+        let mb = MaybeBox::new(t);
+        match mb.unpack() {
+            Unpacked::Boxed(b) => {
+                assert_eq!(&*b, "hello");
+            },
+            x => panic!("Unexpected!: {:?}", x),
+        };
     }
 }
 
